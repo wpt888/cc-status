@@ -53,15 +53,15 @@ function fmtTokens(n) {
   return String(n);
 }
 
-// Render a 10-segment bar for a 0–100 percentage.
-// Filled portion is colored by threshold; the unused portion is a solid block
-// in dim gray (no hatched `░` glyph — renders cleanly without GPU acceleration).
+// Render a 10-segment line bar for a 0–100 percentage.
+// Used portion is a heavy line (━) colored by threshold; the unused portion is
+// a thin line (─) in dim gray. No hatched glyphs — clean without GPU acceleration.
 function bar(pct) {
   const p = clampPct(pct);
   const filled = Math.max(0, Math.min(10, Math.round(p / 10)));
   const c = pctColor(p);
-  const filledBar = '█'.repeat(filled);
-  const emptyBar = '█'.repeat(10 - filled);
+  const filledBar = '━'.repeat(filled);
+  const emptyBar = '─'.repeat(10 - filled);
   return `${c}${filledBar}${ANSI.gray}${emptyBar}${ANSI.reset} ${c}${Math.round(p)}%${ANSI.reset}`;
 }
 
