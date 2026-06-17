@@ -27,6 +27,7 @@ const ANSI = {
   orange: '\x1b[38;5;208m',
   red: '\x1b[31m',
   cyan: '\x1b[36m',
+  gray: '\x1b[90m', // dim track for the unused portion of a bar
 };
 
 const DOT = ` ${ANSI.dim}·${ANSI.reset} `;
@@ -52,13 +53,16 @@ function fmtTokens(n) {
   return String(n);
 }
 
-// Render a 10-segment colored bar for a 0–100 percentage.
+// Render a 10-segment bar for a 0–100 percentage.
+// Filled portion is colored by threshold; the unused portion is a solid block
+// in dim gray (no hatched `░` glyph — renders cleanly without GPU acceleration).
 function bar(pct) {
   const p = clampPct(pct);
   const filled = Math.max(0, Math.min(10, Math.round(p / 10)));
-  const blocks = '█'.repeat(filled) + '░'.repeat(10 - filled);
   const c = pctColor(p);
-  return `${c}${blocks}${ANSI.reset} ${c}${Math.round(p)}%${ANSI.reset}`;
+  const filledBar = '█'.repeat(filled);
+  const emptyBar = '█'.repeat(10 - filled);
+  return `${c}${filledBar}${ANSI.gray}${emptyBar}${ANSI.reset} ${c}${Math.round(p)}%${ANSI.reset}`;
 }
 
 function clampPct(p) {
