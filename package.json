@@ -1,0 +1,29 @@
+{
+  "name": "cc-status",
+  "version": "1.0.0",
+  "description": "A clean, dependency-free status line for Claude Code showing 5-hour + weekly usage windows and current-session context (percent + tokens).",
+  "bin": {
+    "cc-status": "statusline.js"
+  },
+  "main": "statusline.js",
+  "scripts": {
+    "demo": "node statusline.js"
+  },
+  "keywords": [
+    "claude-code",
+    "statusline",
+    "usage",
+    "rate-limits",
+    "cli"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=16"
+  },
+  "files": [
+    "statusline.js",
+    "install.ps1",
+    "README.md",
+    "LICENSE"
+  ]
+}
