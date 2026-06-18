@@ -28,9 +28,15 @@ otherwise show stale numbers for hours, even though another active window alread
 account-wide usage. cc-status fixes this by syncing through a tiny shared cache
 (`~/.claude/cc-status-ratelimits.json`): every render merges this session's snapshot with the cache and
 keeps the **freshest** value per window, so any active window's fresh numbers propagate to all the others
-on their next refresh. Freshness is decided without a clock — a later `resets_at` means a newer window,
-and within the same window usage only grows, so the higher `used_percentage` is the more recent one
-(an already-expired window loses automatically).
+on their next refresh.
+
+Freshness is decided by **observation time**, not by magnitude. The 5h/7d windows are *sliding* — the
+percentage can go **down** within the same `resets_at` as older usage ages out — so "the bigger number is
+newer" would be wrong and would latch onto a high-water mark forever. Instead, each session's observation
+is timestamped with its `transcript_path` file's mtime (Claude Code appends to the transcript on every API
+response, so its mtime ≈ when that session last saw `rate_limits`). The most recently observed value wins,
+and a rolled window — a later `resets_at` — always wins first. An idle window's stale numbers therefore
+can never overwrite a fresh window's, and a legitimate drop is honored.
 
 ## Why
 
@@ -101,8 +107,9 @@ Claude Code sends a JSON object on stdin. cc-status uses:
 | `workspace.current_dir` (or `cwd`) | folder name |
 | `context_window.used_percentage` | session context % |
 | `context_window.total_input_tokens` / `context_window_size` | session context tokens |
-| `rate_limits.five_hour.used_percentage` | 5-hour bar |
-| `rate_limits.seven_day.used_percentage` | weekly bar |
+| `rate_limits.five_hour.used_percentage` / `.resets_at` | 5-hour bar + window identity |
+| `rate_limits.seven_day.used_percentage` / `.resets_at` | weekly bar + window identity |
+| `transcript_path` | mtime = observation time for cross-window freshness |
 
 Every field is read defensively — missing or `null` values degrade to `--%` / `0%` instead of crashing,
 so the footer never breaks. See the [official statusline docs](https://code.claude.com/docs/en/statusline)
