@@ -131,6 +131,22 @@ function pctColor(pct) {
   return ANSI.green;
 }
 
+// Color for the reasoning-effort label. Deliberately NOT the same ramp as the
+// usage bars (green/yellow/orange/red mean "near the limit" there) — reusing
+// those would make a normal "high" look like a warning. Cyan reads as neutral
+// info for the common low/medium/high; warm tones only at xhigh/max, where the
+// effort genuinely burns more tokens.
+function effortColor(level) {
+  switch (level) {
+    case 'low': return ANSI.gray;
+    case 'medium': return ANSI.green;
+    case 'high': return ANSI.cyan;
+    case 'xhigh': return ANSI.orange;
+    case 'max': return ANSI.red;
+    default: return ANSI.cyan;
+  }
+}
+
 // ---- formatting -------------------------------------------------------------
 
 // 70000 -> "70k", 1_500_000 -> "1.5M", 850 -> "850"
@@ -174,7 +190,16 @@ function buildContextLine(data) {
   const segs = [];
 
   const model = data && data.model && data.model.display_name;
-  if (model) segs.push(`${ANSI.bold}${model}${ANSI.reset}`);
+  if (model) {
+    let modelSeg = `${ANSI.bold}${model}${ANSI.reset}`;
+    // effort is absent when the current model doesn't support the parameter.
+    const effort =
+      data && data.effort && typeof data.effort.level === 'string' ? data.effort.level : null;
+    if (effort) {
+      modelSeg += ` ${effortColor(effort)}${effort}${ANSI.reset}`;
+    }
+    segs.push(modelSeg);
+  }
 
   const dir = baseName((data && data.workspace && data.workspace.current_dir) || data.cwd);
   if (dir) segs.push(`${ANSI.dim}${dir}${ANSI.reset}`);

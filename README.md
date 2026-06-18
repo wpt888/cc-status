@@ -4,12 +4,18 @@ A clean, dependency-free **status line for [Claude Code](https://claude.com/clau
 real usage at a glance — directly in the terminal footer, updated in real time.
 
 ```
-Opus  ·  my-project  ·  ctx 35%  ·  70k/200k
+Opus high  ·  my-project  ·  ctx 35%  ·  70k/200k
 5h ████░░░░░░ 24%      7d ████░░░░░░ 41%
 ```
 
-- **Line 1** — model · current folder · **context window** of this session (percent **and** tokens).
+- **Line 1** — model + **reasoning effort** · current folder · **context window** of this session
+  (percent **and** tokens).
 - **Line 2** — your **5-hour** and **7-day (weekly)** usage windows, as colored bars + percent.
+
+The effort label (`low` / `medium` / `high` / `xhigh` / `max`) sits right after the model name and
+reflects the live `/effort` setting — handy because higher effort burns through your limits faster. It's
+colored on its own neutral-to-warm ramp (cyan for the common `high`, warm tones at `xhigh`/`max`) so it
+never gets mistaken for the usage-bar warning colors. It disappears for models that don't support effort.
 
 No `/usage` command, no desktop app, no log scraping. The 5h/weekly numbers come straight from the
 official `rate_limits` field Claude Code passes to status line scripts — the same numbers `/usage` shows.
@@ -91,6 +97,7 @@ Claude Code sends a JSON object on stdin. cc-status uses:
 | Field | Used for |
 |---|---|
 | `model.display_name` | model label |
+| `effort.level` | reasoning-effort label after the model |
 | `workspace.current_dir` (or `cwd`) | folder name |
 | `context_window.used_percentage` | session context % |
 | `context_window.total_input_tokens` / `context_window_size` | session context tokens |
