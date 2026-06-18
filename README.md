@@ -30,18 +30,21 @@ account-wide usage. cc-status fixes this by syncing through a tiny shared cache
 keeps the **freshest** value per window, so any active window's fresh numbers propagate to all the others
 on their next refresh.
 
-Freshness is decided by **observation time**, not by magnitude. The 5h/7d windows are *sliding* — the
-percentage can go **down** within the same `resets_at` as older usage ages out — so "the bigger number is
-newer" would be wrong and would latch onto a high-water mark forever. Instead, each session's observation
-is timestamped with its `transcript_path` file's mtime (Claude Code appends to the transcript on every API
-response, so its mtime ≈ when that session last saw `rate_limits`). A rolled window — a later `resets_at` —
-always wins first; otherwise the most recently observed value wins, so an idle window's stale numbers can
-never overwrite a fresh window's and a legitimate drop is honored.
+Freshness is decided by **when a value was observed**, not by magnitude. The 5h/7d windows are *sliding* —
+the percentage can go **down** within the same `resets_at` as older usage ages out — so "the bigger number
+is newer" would be wrong and would latch onto a high-water mark forever.
+
+The trustworthy freshness signal is that the `rate_limits` **value actually changed**, which only happens
+on a real API response. (A transcript-mtime proxy doesn't work: `/clear`, `/rename`, and plain user
+messages all touch the transcript without refreshing `rate_limits`.) So the cache remembers each session's
+last-seen value; when this render's value differs, a response just landed and it's stamped fresh. A value
+we've never seen change is treated as old.
 
 **The window you're actively using shows its own numbers** — the ones that match `/usage` in that same
-window. The shared cache only kicks in once a window has gone quiet (no API response for ~3 minutes), which
-is exactly the stale-idle case it exists to fix. This keeps a single hyper-active window (one burning
-tokens fast) from broadcasting its slightly different reading onto every other window's bar.
+window — for as long as its value keeps changing (within ~3 min). Once it goes quiet (idle, or just
+`/clear`ed with no new response), it falls back to the freshest cached value instead of a stale own
+reading. Only values seen to change are published, so a stale snapshot can never overwrite a fresh one,
+and a rolled window (greater `resets_at`) always wins so resets are never missed.
 
 ## Why
 
@@ -114,7 +117,7 @@ Claude Code sends a JSON object on stdin. cc-status uses:
 | `context_window.total_input_tokens` / `context_window_size` | session context tokens |
 | `rate_limits.five_hour.used_percentage` / `.resets_at` | 5-hour bar + window identity |
 | `rate_limits.seven_day.used_percentage` / `.resets_at` | weekly bar + window identity |
-| `transcript_path` | mtime = observation time for cross-window freshness |
+| `session_id` | keys per-session last-seen value for change detection |
 
 Every field is read defensively — missing or `null` values degrade to `--%` / `0%` instead of crashing,
 so the footer never breaks. See the [official statusline docs](https://code.claude.com/docs/en/statusline)

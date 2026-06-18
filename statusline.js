@@ -33,43 +33,47 @@ const path = require('path');
 //   Fix: a shared on-disk cache where any active window publishes its fresh
 //   numbers and every window displays the freshest known. The 5h/7d windows are
 //   SLIDING — the percentage can go DOWN within the same `resets_at` as old
-//   usage ages out — so freshness must be decided by *observation time*, never
-//   by magnitude (an earlier "higher is newer" guess latched onto the high-water
-//   mark and never came back down).
+//   usage ages out — so freshness must be decided by WHEN a value was observed,
+//   never by magnitude (an earlier "higher is newer" guess latched onto the
+//   high-water mark and never came back down).
 //
-//   We can't read a capture time off stdin directly, but Claude Code appends to
-//   the session's `transcript_path` on every API response — so that file's mtime
-//   is ~when this session last received `rate_limits`. We use it as an ABSOLUTE
-//   observation timestamp: an idle session has an old transcript mtime, an active
-//   one a fresh mtime.
+//   What counts as a fresh observation? NOT "the transcript was written"
+//   (`/clear`, `/rename`, and plain user messages all touch the transcript
+//   without producing a new API response, so its mtime lies). The only reliable
+//   signal is that the `rate_limits` VALUE actually changed — that happens solely
+//   on a real API response. So we remember each session's last-seen value in the
+//   cache; when this render's value differs, we KNOW a response just landed and
+//   stamp `changed_at = now`. A value we've never seen change is treated as old.
 //
-//   DISPLAY rule (the important part): a window you're actively using shows ITS
-//   OWN numbers — those match what `/usage` reports in that same window. We only
-//   fall back to the shared cache when THIS session has gone quiet (its own
-//   observation is older than FRESH_SEC), which is exactly the stale-idle case
-//   the cache exists to fix. This stops a single hyper-active window (one burning
-//   tokens fast, writing its transcript every second) from forcing its slightly
-//   different reading onto every other window. A rolled window — a greater
-//   `resets_at` seen elsewhere — still overrides, so a reset is never missed.
+//   DISPLAY rule: a window you're actively using (its value changed within
+//   FRESH_SEC) shows ITS OWN numbers — the ones that match `/usage` there. Once
+//   it goes quiet, it falls back to the freshest cached value. So a `/clear`ed or
+//   idle window can't keep showing a stale own reading, and a hyper-active window
+//   can't force its reading onto everyone. A rolled window (greater `resets_at`)
+//   always wins, so resets are never missed.
 //
-//   PUBLISH rule: we always fold our value into the cache by newest observation
-//   so idle windows elsewhere can read it; freshness is by time, never magnitude.
+//   PUBLISH rule: only values we just saw CHANGE (proven fresh now) go into the
+//   shared cache, so a stale snapshot can never overwrite a genuinely fresh one.
 
 const TFIELD = ['five_hour', 'seven_day'];
-const FRESH_SEC = 180; // trust our own snapshot if we observed it within 3 min
+const FRESH_SEC = 180; // trust our own value if it changed within the last 3 min
+const SESSION_TTL_SEC = 12 * 3600; // forget a session's last-seen after 12h idle
 const CACHE_PATH = path.join(os.homedir(), '.claude', 'cc-status-ratelimits.json');
 
-// Read the shared cache: { windows: {five_hour, seven_day} }. Returns a
+// Read the shared cache: { windows: {...}, sessions: {<id>: {...}} }. Returns a
 // well-formed empty shape on any error (missing/corrupt) — the cache is
 // best-effort and must never break rendering.
 function readCache() {
   try {
     const raw = fs.readFileSync(CACHE_PATH, 'utf8');
     const obj = JSON.parse(raw.replace(/^﻿/, ''));
-    const windows = obj && typeof obj.windows === 'object' && obj.windows ? obj.windows : {};
-    return { windows };
+    if (!obj || typeof obj !== 'object') return { windows: {}, sessions: {} };
+    return {
+      windows: obj.windows && typeof obj.windows === 'object' ? obj.windows : {},
+      sessions: obj.sessions && typeof obj.sessions === 'object' ? obj.sessions : {},
+    };
   } catch (_) {
-    return { windows: {} };
+    return { windows: {}, sessions: {} };
   }
 }
 
@@ -87,17 +91,6 @@ function writeCache(cache, sessionId) {
   }
 }
 
-// When did this session last receive data? Transcript mtime ≈ last API response.
-// Falls back to now if the path is missing/unreadable (treat as fresh).
-function observedAt(transcriptPath, nowSec) {
-  try {
-    if (transcriptPath) return Math.floor(fs.statSync(transcriptPath).mtimeMs / 1000);
-  } catch (_) {
-    /* fall through */
-  }
-  return nowSec;
-}
-
 // Extract a {used_percentage, resets_at} pair for one window, or null if absent.
 function getWin(rl, key) {
   const w = rl && rl[key];
@@ -106,6 +99,12 @@ function getWin(rl, key) {
     used_percentage: w.used_percentage,
     resets_at: typeof w.resets_at === 'number' ? w.resets_at : 0,
   };
+}
+
+// Same observed value? (used to detect whether a new API response landed)
+function sameVal(a, b) {
+  if (!a || !b) return !a && !b;
+  return a.used_percentage === b.used_percentage && a.resets_at === b.resets_at;
 }
 
 // Pick the fresher of two timestamped window entries {used_percentage,
@@ -119,39 +118,72 @@ function fresherEntry(a, b) {
   return (a.observed_at || 0) >= (b.observed_at || 0) ? a : b;
 }
 
-// Merge this session's stdin snapshot with the shared cache. Returns
-// { rate_limits, cache, dirty }: rate_limits is what to DISPLAY (own value when
-// this session is fresh, else the freshest cached), cache is the object to
-// PERSIST (always the freshest, for idle windows elsewhere), dirty whether to
-// write. transcript mtime is the observation time.
-function mergeRateLimits(stdinRL, cache, transcriptPath, nowSec) {
-  const obs = observedAt(transcriptPath, nowSec);
-  const ownFresh = nowSec - obs <= FRESH_SEC;
+// Merge this session's stdin snapshot with the shared cache using value-change
+// detection for freshness. Returns { rate_limits, cache, dirty }: rate_limits is
+// what to DISPLAY, cache is the object to PERSIST, dirty whether to write.
+function mergeRateLimits(stdinRL, cache, sessionId, nowSec) {
+  const sid = sessionId || 'unknown';
+  const prev = cache.sessions[sid] || null; // our last-seen {five_hour, seven_day, changed_at}
+
+  // Read our windows and decide whether the VALUE changed since we last saw it
+  // (a real API response just landed) — the only trustworthy freshness signal.
+  const mine = {};
+  let hasData = false;
+  let changed = false;
+  for (const key of TFIELD) {
+    const w = getWin(stdinRL, key);
+    if (w) {
+      mine[key] = w;
+      hasData = true;
+    }
+    if (prev && !sameVal(prev[key] || null, w)) changed = true;
+  }
+
+  // When were our values observed? now if just changed; else the recorded change
+  // time; 0 (unknown/old) on first sighting — we can't prove an unchanged value
+  // is recent, so it won't be treated as fresh.
+  const changedAt = changed ? nowSec : prev && typeof prev.changed_at === 'number' ? prev.changed_at : 0;
+  const ownFresh = hasData && changedAt > 0 && nowSec - changedAt <= FRESH_SEC;
+
   const display = {};
   const windows = {};
   let dirty = false;
   for (const key of TFIELD) {
     const cached = cache.windows[key] || null;
-    const mine = getWin(stdinRL, key);
-    const myEntry = mine ? { ...mine, observed_at: obs } : null;
+    const myEntry = mine[key] ? { ...mine[key], observed_at: changedAt } : null;
 
-    // Persist the freshest of the two so idle windows elsewhere benefit.
-    const best = fresherEntry(myEntry, cached);
+    // Publish ONLY a value we just saw change (proven fresh now) so a stale
+    // snapshot can never overwrite a genuinely fresh cached one.
+    const pub = changed && myEntry ? { ...mine[key], observed_at: nowSec } : null;
+    const best = fresherEntry(pub, cached);
     if (best) windows[key] = best;
     if (best && best !== cached) dirty = true;
 
-    // Display: prefer our own value while we're actively using this window —
-    // unless the cache holds a newer window (rolled `resets_at`), which always
-    // wins. Otherwise (we've gone quiet) show the freshest known.
+    // Display: our own value while actively in use, unless a newer window
+    // (rolled resets_at) exists in the cache. Otherwise the freshest known.
     let shown;
-    if (myEntry && ownFresh && !(cached && cached.resets_at > myEntry.resets_at)) {
+    if (ownFresh && myEntry && !(cached && cached.resets_at > myEntry.resets_at)) {
       shown = myEntry;
     } else {
-      shown = best;
+      shown = fresherEntry(myEntry, cached);
     }
     if (shown) display[key] = shown;
   }
-  return { rate_limits: display, cache: { windows }, dirty };
+
+  // Persist this session's last-seen (so the next render can detect a change),
+  // pruning sessions idle past the TTL to bound the file.
+  const sessions = {};
+  for (const [id, rec] of Object.entries(cache.sessions)) {
+    if (rec && typeof rec.seen_at === 'number' && rec.seen_at >= nowSec - SESSION_TTL_SEC) {
+      sessions[id] = rec;
+    }
+  }
+  if (hasData) {
+    sessions[sid] = { ...mine, changed_at: changedAt, seen_at: nowSec };
+    if (!prev || changed) dirty = true; // persist baseline / new value
+  }
+
+  return { rate_limits: display, cache: { windows, sessions }, dirty };
 }
 
 // ---- ANSI helpers -----------------------------------------------------------
@@ -314,7 +346,7 @@ function main() {
     try {
       const nowSec = Math.floor(Date.now() / 1000);
       const stdinRL = (data && data.rate_limits) || {};
-      const res = mergeRateLimits(stdinRL, readCache(), data.transcript_path, nowSec);
+      const res = mergeRateLimits(stdinRL, readCache(), data.session_id, nowSec);
       data.rate_limits = res.rate_limits;
       if (res.dirty) writeCache(res.cache, data.session_id);
     } catch (_) {
