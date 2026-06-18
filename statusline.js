@@ -16,6 +16,97 @@
  * Docs: https://code.claude.com/docs/en/statusline
  */
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+// ---- cross-session rate-limit cache -----------------------------------------
+//
+// Why this exists:
+//   `rate_limits` on stdin comes from the most recent API response *of this
+//   session* and only appears after that session's first API call. So an idle
+//   window (no recent prompts) shows a FROZEN snapshot — re-running the script
+//   on `refreshInterval` re-renders the same stale numbers because the input
+//   never changes. Meanwhile the 5h/7d limits are account-global: another,
+//   active window already knows fresher values.
+//
+//   Fix: every invocation merges its stdin snapshot with a shared on-disk cache
+//   and writes back the freshest. An active window publishes fresh numbers; an
+//   idle window picks them up on its next refresh tick. The whole account
+//   converges to one truth instead of each window showing its own last-seen.
+
+const CACHE_PATH = path.join(os.homedir(), '.claude', 'cc-status-ratelimits.json');
+
+// Read the shared cache. Returns {} on any error (missing/corrupt) — the cache
+// is best-effort and must never break rendering.
+function readCache() {
+  try {
+    const raw = fs.readFileSync(CACHE_PATH, 'utf8');
+    const obj = JSON.parse(raw.replace(/^﻿/, ''));
+    return obj && typeof obj === 'object' ? obj : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+// Atomically write the merged snapshot back. Unique temp name (session + pid)
+// avoids collisions between concurrent windows; rename is atomic on the OS.
+// Any failure is swallowed — a write loss self-heals on the next tick.
+function writeCache(rl, sessionId) {
+  try {
+    const tag = `${sessionId || 'x'}-${process.pid}`;
+    const tmp = `${CACHE_PATH}.${tag}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(rl), 'utf8');
+    fs.renameSync(tmp, CACHE_PATH);
+  } catch (_) {
+    /* best-effort */
+  }
+}
+
+// Is this window snapshot usable? A window whose reset time is already in the
+// past has rolled over, so its percentage is stale by definition.
+function isLiveWindow(w, nowSec) {
+  return (
+    w &&
+    typeof w.used_percentage === 'number' &&
+    (typeof w.resets_at !== 'number' || w.resets_at > nowSec)
+  );
+}
+
+// Pick the fresher of two snapshots for ONE window (five_hour / seven_day).
+// Monotonic freshness without a capture timestamp:
+//   - later resets_at  => newer rolling window  => fresher
+//   - same resets_at   => usage only grows      => higher used_percentage is later
+// An expired window (resets_at <= now) loses to any live one automatically,
+// because a live window's resets_at is in the future and thus larger.
+function fresherWindow(a, b, nowSec) {
+  const aLive = isLiveWindow(a, nowSec);
+  const bLive = isLiveWindow(b, nowSec);
+  if (!aLive) return bLive ? b : null;
+  if (!bLive) return a;
+  const ar = typeof a.resets_at === 'number' ? a.resets_at : 0;
+  const br = typeof b.resets_at === 'number' ? b.resets_at : 0;
+  if (ar !== br) return ar > br ? a : b;
+  return a.used_percentage >= b.used_percentage ? a : b;
+}
+
+// Merge stdin rate_limits with the cached ones, per window. Returns the merged
+// object plus whether stdin contributed anything new (so we only write when we
+// actually have fresher data — keeps idle windows from churning the file).
+function mergeRateLimits(stdinRL, cacheRL, nowSec) {
+  const out = {};
+  let changed = false;
+  for (const key of ['five_hour', 'seven_day']) {
+    const s = stdinRL && stdinRL[key];
+    const c = cacheRL && cacheRL[key];
+    const winner = fresherWindow(s, c, nowSec);
+    if (winner) out[key] = winner;
+    // We hold fresher data than the cache when stdin won (and differs from cache).
+    if (winner && winner === s && winner !== c) changed = true;
+  }
+  return { merged: out, changed };
+}
+
 // ---- ANSI helpers -----------------------------------------------------------
 
 const ANSI = {
@@ -145,6 +236,19 @@ function main() {
     } catch (_) {
       data = {};
     }
+
+    // Merge this session's (possibly frozen) rate_limits with the account-wide
+    // shared cache so idle windows still show the freshest known numbers.
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const stdinRL = (data && data.rate_limits) || {};
+      const { merged, changed } = mergeRateLimits(stdinRL, readCache(), nowSec);
+      data.rate_limits = merged;
+      if (changed) writeCache(merged, data.session_id);
+    } catch (_) {
+      /* if the merge fails, fall back to whatever stdin gave us */
+    }
+
     try {
       process.stdout.write(render(data));
     } catch (_) {

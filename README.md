@@ -14,6 +14,18 @@ Opus  ·  my-project  ·  ctx 35%  ·  70k/200k
 No `/usage` command, no desktop app, no log scraping. The 5h/weekly numbers come straight from the
 official `rate_limits` field Claude Code passes to status line scripts — the same numbers `/usage` shows.
 
+### Always-fresh across windows
+
+Claude Code only hands a script the `rate_limits` from **the current session's most recent API
+response** — so an idle window (one you're reading, not prompting in) sees a *frozen* snapshot and would
+otherwise show stale numbers for hours, even though another active window already knows the real
+account-wide usage. cc-status fixes this by syncing through a tiny shared cache
+(`~/.claude/cc-status-ratelimits.json`): every render merges this session's snapshot with the cache and
+keeps the **freshest** value per window, so any active window's fresh numbers propagate to all the others
+on their next refresh. Freshness is decided without a clock — a later `resets_at` means a newer window,
+and within the same window usage only grows, so the higher `used_percentage` is the more recent one
+(an already-expired window loses automatically).
+
 ## Why
 
 If you're on a Claude Max/Pro plan you constantly want to know *how close am I to the 5-hour and weekly
@@ -50,7 +62,7 @@ The installer backs up your `~/.claude/settings.json` and inserts the `statusLin
      "statusLine": {
        "type": "command",
        "command": "\"C:/Program Files/nodejs/node.exe\" \"C:/Development/CC-status/statusline.js\"",
-       "refreshInterval": 30
+       "refreshInterval": 10
      }
    }
    ```
@@ -67,8 +79,10 @@ The installer backs up your `~/.claude/settings.json` and inserts the `statusLin
 
 3. Start a new Claude Code session — the footer now shows the two lines.
 
-`refreshInterval: 30` re-runs the script every 30s so the 5h/weekly bars stay current even when you're
-reading rather than prompting. Lower it for snappier updates; remove it to only refresh on activity.
+`refreshInterval: 10` re-runs the script every 10s so an idle window picks up the freshest account-wide
+5h/weekly numbers from the shared cache within ~10s, instead of waiting for its own next prompt. Raise it
+to spawn the script less often; remove it to only refresh on activity (the cross-window sync still works,
+just on each event rather than on a timer).
 
 ## The data it reads (stdin contract)
 

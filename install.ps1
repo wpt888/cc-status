@@ -62,7 +62,9 @@ $json = Get-Content $settingsPath -Raw | ConvertFrom-Json
 $statusLine = [PSCustomObject]@{
   type            = 'command'
   command         = "`"$nodePath`" `"$cmdPath`""
-  refreshInterval = 30
+  # 10s so an idle window pulls fresh account-wide 5h/7d numbers (published by
+  # any active window into the shared cache) within ~10s instead of lagging.
+  refreshInterval = 10
 }
 
 if ($json.PSObject.Properties.Name -contains 'statusLine') {
