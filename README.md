@@ -34,9 +34,14 @@ Freshness is decided by **observation time**, not by magnitude. The 5h/7d window
 percentage can go **down** within the same `resets_at` as older usage ages out — so "the bigger number is
 newer" would be wrong and would latch onto a high-water mark forever. Instead, each session's observation
 is timestamped with its `transcript_path` file's mtime (Claude Code appends to the transcript on every API
-response, so its mtime ≈ when that session last saw `rate_limits`). The most recently observed value wins,
-and a rolled window — a later `resets_at` — always wins first. An idle window's stale numbers therefore
-can never overwrite a fresh window's, and a legitimate drop is honored.
+response, so its mtime ≈ when that session last saw `rate_limits`). A rolled window — a later `resets_at` —
+always wins first; otherwise the most recently observed value wins, so an idle window's stale numbers can
+never overwrite a fresh window's and a legitimate drop is honored.
+
+**The window you're actively using shows its own numbers** — the ones that match `/usage` in that same
+window. The shared cache only kicks in once a window has gone quiet (no API response for ~3 minutes), which
+is exactly the stale-idle case it exists to fix. This keeps a single hyper-active window (one burning
+tokens fast) from broadcasting its slightly different reading onto every other window's bar.
 
 ## Why
 

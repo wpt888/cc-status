@@ -41,12 +41,22 @@ const path = require('path');
 //   the session's `transcript_path` on every API response — so that file's mtime
 //   is ~when this session last received `rate_limits`. We use it as an ABSOLUTE
 //   observation timestamp: an idle session has an old transcript mtime, an active
-//   one a fresh mtime. The cache keeps, per window, the entry with the newest
-//   `observed_at` (a rolled window — greater `resets_at` — wins first). So stale
-//   idle data can never overwrite fresh data, and a value that legitimately drops
-//   within the same window is honored because its observation is more recent.
+//   one a fresh mtime.
+//
+//   DISPLAY rule (the important part): a window you're actively using shows ITS
+//   OWN numbers — those match what `/usage` reports in that same window. We only
+//   fall back to the shared cache when THIS session has gone quiet (its own
+//   observation is older than FRESH_SEC), which is exactly the stale-idle case
+//   the cache exists to fix. This stops a single hyper-active window (one burning
+//   tokens fast, writing its transcript every second) from forcing its slightly
+//   different reading onto every other window. A rolled window — a greater
+//   `resets_at` seen elsewhere — still overrides, so a reset is never missed.
+//
+//   PUBLISH rule: we always fold our value into the cache by newest observation
+//   so idle windows elsewhere can read it; freshness is by time, never magnitude.
 
 const TFIELD = ['five_hour', 'seven_day'];
+const FRESH_SEC = 180; // trust our own snapshot if we observed it within 3 min
 const CACHE_PATH = path.join(os.homedir(), '.claude', 'cc-status-ratelimits.json');
 
 // Read the shared cache: { windows: {five_hour, seven_day} }. Returns a
@@ -109,23 +119,39 @@ function fresherEntry(a, b) {
   return (a.observed_at || 0) >= (b.observed_at || 0) ? a : b;
 }
 
-// Merge this session's stdin snapshot into the shared cache using the transcript
-// mtime as the observation time. Returns { rate_limits, cache, dirty }:
-// rate_limits is what to render, cache is the object to persist, dirty whether a
-// write is warranted.
+// Merge this session's stdin snapshot with the shared cache. Returns
+// { rate_limits, cache, dirty }: rate_limits is what to DISPLAY (own value when
+// this session is fresh, else the freshest cached), cache is the object to
+// PERSIST (always the freshest, for idle windows elsewhere), dirty whether to
+// write. transcript mtime is the observation time.
 function mergeRateLimits(stdinRL, cache, transcriptPath, nowSec) {
   const obs = observedAt(transcriptPath, nowSec);
+  const ownFresh = nowSec - obs <= FRESH_SEC;
+  const display = {};
   const windows = {};
   let dirty = false;
   for (const key of TFIELD) {
     const cached = cache.windows[key] || null;
     const mine = getWin(stdinRL, key);
     const myEntry = mine ? { ...mine, observed_at: obs } : null;
+
+    // Persist the freshest of the two so idle windows elsewhere benefit.
     const best = fresherEntry(myEntry, cached);
     if (best) windows[key] = best;
-    if (best && best !== cached) dirty = true; // our value superseded the cache
+    if (best && best !== cached) dirty = true;
+
+    // Display: prefer our own value while we're actively using this window —
+    // unless the cache holds a newer window (rolled `resets_at`), which always
+    // wins. Otherwise (we've gone quiet) show the freshest known.
+    let shown;
+    if (myEntry && ownFresh && !(cached && cached.resets_at > myEntry.resets_at)) {
+      shown = myEntry;
+    } else {
+      shown = best;
+    }
+    if (shown) display[key] = shown;
   }
-  return { rate_limits: windows, cache: { windows }, dirty };
+  return { rate_limits: display, cache: { windows }, dirty };
 }
 
 // ---- ANSI helpers -----------------------------------------------------------
