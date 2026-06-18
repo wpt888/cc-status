@@ -49,14 +49,21 @@ The installer backs up your `~/.claude/settings.json` and inserts the `statusLin
    {
      "statusLine": {
        "type": "command",
-       "command": "node \"C:/Development/CC-status/statusline.js\"",
+       "command": "\"C:/Program Files/nodejs/node.exe\" \"C:/Development/CC-status/statusline.js\"",
        "refreshInterval": 30
      }
    }
    ```
 
-   On macOS/Linux use the path to where you cloned it, e.g.
-   `"command": "node \"$HOME/cc-status/statusline.js\""`.
+   **Use an absolute path to `node.exe`, not a bare `node`.** Claude Code spawns the status-line
+   command in whatever environment launched the session, and a bare `node` only works if it happens to
+   be on that environment's `PATH`. With nvm-for-windows (or any multi-version setup) `PATH` is not
+   guaranteed in every terminal/IDE, so a bare `node` makes the line render in some directories and
+   silently vanish in others. Pinning the interpreter removes that dependency. Find your node with
+   `(Get-Command node).Source`, preferring a stable system install like `C:\Program Files\nodejs`.
+
+   On macOS/Linux use absolute paths too, e.g.
+   `"command": "/usr/local/bin/node \"$HOME/cc-status/statusline.js\""` (`which node` to find it).
 
 3. Start a new Claude Code session — the footer now shows the two lines.
 
